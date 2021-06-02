@@ -25,17 +25,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	kafkasarama "knative.dev/eventing-kafka/pkg/common/kafka/sarama"
-
-	"github.com/Shopify/sarama"
-	"k8s.io/client-go/kubernetes/fake"
-	"knative.dev/eventing-kafka/pkg/common/constants"
-	"knative.dev/pkg/system"
-
-	commonconfig "knative.dev/eventing-kafka/pkg/common/config"
-
-	"knative.dev/eventing-kafka/pkg/common/client"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
