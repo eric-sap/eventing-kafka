@@ -18,14 +18,17 @@ package mtadapter
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/Shopify/sarama"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
+	logtesting "knative.dev/pkg/logging/testing"
 	pkgtesting "knative.dev/pkg/reconciler/testing"
 	"knative.dev/pkg/source"
 
@@ -40,7 +43,7 @@ import (
 
 var (
 	runningAdapterChan  = make(chan *sampleAdapter)
-	stoppingAdapterChan = make(chan *sampleAdapter)
+	stoppingAdapterChan = make(chan *sampleAdapter, 1)
 )
 
 const (
@@ -51,21 +54,21 @@ func TestUpdateRemoveSources(t *testing.T) {
 	ctx, _ := pkgtesting.SetupFakeContext(t)
 	ctx, cancelAdapter := context.WithCancel(ctx)
 
-	env := &AdapterConfig{PodName: podName, MemoryLimit: "0"}
+	env := &AdapterConfig{PodName: podName, MemoryRequest: "0"}
 	ceClient := adaptertest.NewTestClient()
 
-	adapter := newAdapter(ctx, env, ceClient, newSampleAdapter).(*Adapter)
+	mtadapter := newAdapter(ctx, env, ceClient, newSampleAdapter).(*Adapter)
 
-	adapterStopped := make(chan bool)
+	mtadapterStopped := make(chan bool)
 	go func() {
-		err := adapter.Start(ctx)
+		err := mtadapter.Start(ctx)
 		if err != nil {
 			t.Error("Unexpected error ", err)
 		}
-		adapterStopped <- true
+		mtadapterStopped <- true
 	}()
 
-	err := adapter.Update(ctx, &sourcesv1beta1.KafkaSource{
+	err := mtadapter.Update(ctx, &sourcesv1beta1.KafkaSource{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-name",
 			Namespace: "test-ns",
@@ -83,11 +86,20 @@ func TestUpdateRemoveSources(t *testing.T) {
 		t.Fatalf("Unexpected error %v", err)
 	}
 
-	if _, ok := adapter.sources["test-ns/test-name"]; !ok {
+	select {
+	case a := <-runningAdapterChan:
+		if !a.running {
+			t.Error("Expected adapter to be running")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("sub-adapter failed to start after 100 ms")
+	}
+
+	if _, ok := mtadapter.sources["test-ns/test-name"]; !ok {
 		t.Error(`Expected adapter to contain "test-ns/test-name"`)
 	}
 
-	err = adapter.Update(ctx, &sourcesv1beta1.KafkaSource{
+	err = mtadapter.Update(ctx, &sourcesv1beta1.KafkaSource{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-name-badBroker",
 			Namespace: "test-ns",
@@ -109,7 +121,7 @@ func TestUpdateRemoveSources(t *testing.T) {
 		t.Fatalf("Unexpected error %v", err)
 	}
 
-	if _, ok := adapter.sources["test-ns/test-name-badBroker"]; !ok {
+	if _, ok := mtadapter.sources["test-ns/test-name-badBroker"]; !ok {
 		t.Error(`Expected adapter to contain "test-ns/test-name-badBroker"`)
 	}
 
@@ -122,7 +134,7 @@ func TestUpdateRemoveSources(t *testing.T) {
 		t.Error("sub-adapter failed to start after 100 ms")
 	}
 
-	adapter.Remove(&sourcesv1beta1.KafkaSource{
+	mtadapter.Remove(&sourcesv1beta1.KafkaSource{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-name",
 			Namespace: "test-ns",
@@ -131,11 +143,20 @@ func TestUpdateRemoveSources(t *testing.T) {
 		Status: sourcesv1beta1.KafkaSourceStatus{},
 	})
 
-	if _, ok := adapter.sources["test-ns/test-name"]; ok {
+	select {
+	case a := <-stoppingAdapterChan:
+		if a.running {
+			t.Error("Expected adapter to not be running")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("sub-adapter failed to stop after 100 ms")
+	}
+
+	if _, ok := mtadapter.sources["test-ns/test-name"]; ok {
 		t.Error(`Expected adapter to not contain "test-ns/test-name"`)
 	}
 
-	adapter.Remove(&sourcesv1beta1.KafkaSource{
+	mtadapter.Remove(&sourcesv1beta1.KafkaSource{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-name-badBroker",
 			Namespace: "test-ns",
@@ -144,10 +165,6 @@ func TestUpdateRemoveSources(t *testing.T) {
 		Status: sourcesv1beta1.KafkaSourceStatus{},
 	})
 
-	if _, ok := adapter.sources["test-ns/test-name-badBroker"]; ok {
-		t.Error(`Expected adapter to not contain "test-ns/test-name-badBroker"`)
-	}
-
 	select {
 	case a := <-stoppingAdapterChan:
 		if a.running {
@@ -155,6 +172,10 @@ func TestUpdateRemoveSources(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Error("sub-adapter failed to stop after 100 ms")
+	}
+
+	if _, ok := mtadapter.sources["test-ns/test-name-badBroker"]; ok {
+		t.Error(`Expected adapter to not contain "test-ns/test-name-badBroker"`)
 	}
 
 	// Make sure the adapter is still running
@@ -167,7 +188,7 @@ func TestUpdateRemoveSources(t *testing.T) {
 	cancelAdapter()
 
 	select {
-	case <-adapterStopped:
+	case <-mtadapterStopped:
 	case <-time.After(2 * time.Second):
 		t.Error("adapter failed to stop after 2 seconds")
 	}
@@ -334,7 +355,7 @@ func TestSourceMTAdapter(t *testing.T) {
 
 			ctx, cancelAdapter := context.WithCancel(ctx)
 
-			env := &AdapterConfig{PodName: podName, MemoryLimit: "0"}
+			env := &AdapterConfig{PodName: podName, MemoryRequest: "0"}
 			ceClient := adaptertest.NewTestClient()
 
 			adapter := newAdapter(ctx, env, ceClient, newSampleAdapter).(*Adapter)
@@ -384,5 +405,43 @@ func (d *sampleAdapter) Start(ctx context.Context) error {
 
 	d.running = false
 	stoppingAdapterChan <- d
+
 	return nil
+}
+
+func TestAdjustResponseSize(t *testing.T) {
+	testCases := map[string]struct {
+		memoryRequest int64
+		sourceCount   int
+		want          int32
+	}{
+		"no memory request":                           {memoryRequest: 0, sourceCount: 1, want: 100 * 1024 * 1024},
+		"memory request, response size less 64k":      {memoryRequest: 128 * 1024, sourceCount: 4, want: 32 * 1024},
+		"memory request, response size more 64k":      {memoryRequest: 512 * 1024, sourceCount: 4, want: 128 * 1024},
+		"memory request, response size more than cap": {memoryRequest: 100 * 1024 * 1024, sourceCount: 1, want: responseSizeCap},
+	}
+
+	for n, tc := range testCases {
+		t.Run(n, func(t *testing.T) {
+			// must run sequentially.
+			sarama.MaxResponseSize = 100 * 1024 * 1024
+
+			sources := make(map[string]cancelContext)
+			for i := 0; i < tc.sourceCount; i++ {
+				sources["s"+strconv.Itoa(i)] = cancelContext{}
+			}
+
+			a := Adapter{
+				memoryRequest: tc.memoryRequest,
+				sources:       sources,
+				logger:        logtesting.TestLogger(t),
+			}
+			a.adjustResponseSize()
+
+			if sarama.MaxResponseSize != tc.want {
+				t.Errorf("Unexpected MaxResponseSize. wanted %d, got %d", tc.want, sarama.MaxResponseSize)
+			}
+		})
+	}
+
 }

@@ -47,17 +47,14 @@ spec:
         - name: VREPLICA_LIMITS_MPS
           value: '50'
 
-        # The memory limit, per vreplica. Must be a quantity.
-        # see https://github.com/kubernetes/apimachinery/blob/master/pkg/api/resource/quantity.go#L31
-        # Should be pod requested memory / pod capacity (see controller.yaml)
-        - name: VREPLICA_LIMITS_MEMORY
-          value: '2Mi'
-
+        # The pod requested memory (see resources.requests.memory)
+        - name: REQUESTS_MEMORY
+          value: '300Mi'
 
         # DO NOT MODIFY: The values below are being filled by the kafka source controller
         # See 500-controller.yaml
         - name: K_METRICS_CONFIG
-          value: '{"Domain":"knative.dev/eventing","Component":"kafkasource","ConfigMap":{"profiling.enable": "true"}}'
+          value: '{"Domain":"knative.dev/eventing","Component":"kafkasource","ConfigMap":{"profiling.enable": "false"}}'
         - name: K_LOGGING_CONFIG
           value: '{}'
         - name: K_LEADER_ELECTION_CONFIG
@@ -68,10 +65,10 @@ spec:
         resources:
           requests:
             cpu: 100m
-            memory: 100Mi
+            memory: 300Mi
           limits:
             cpu: 200m
-            memory: 150Mi
+            memory: 500Mi
 
         ports:
         - name: metrics
